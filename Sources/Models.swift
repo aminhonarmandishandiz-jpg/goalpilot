@@ -79,6 +79,6 @@ struct AppSettings: Codable {
     var dailyCapacity = 240        // focus minutes available per day
     var morningReminder = 8 * 60
     var notificationsOn = true
-    var useCalendar = false
-    var useHealth = false
+    var useCalendar: Bool
+    var useHealth: Bool
 }
