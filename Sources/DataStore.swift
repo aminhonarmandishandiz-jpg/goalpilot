@@ -1,102 +1,400 @@
+
 import Foundation
+import Combine
+
+// MARK: - Data Store
 
 @MainActor
 final class DataStore: ObservableObject {
+
+    // MARK: Published Data
+
     @Published var goals: [Goal] = []
     @Published var disruptions: [Disruption] = []
     @Published var plan: [PlanItem] = []
     @Published var settings = AppSettings()
     @Published var busy: [DateInterval] = []
+
     private var planDay = Calendar.current.startOfDay(for: Date())
     private var credited: [String: Int] = [:]
 
+    // MARK: Persistence
+
     private struct Snapshot: Codable {
-        var goals: [Goal]; var disruptions: [Disruption]; var plan: [PlanItem]
-        var planDay: Date; var settings: AppSettings; var credited: [String: Int]
+        var goals: [Goal]
+        var disruptions: [Disruption]
+        var plan: [PlanItem]
+        var planDay: Date
+        var settings: AppSettings
+        var credited: [String: Int]
     }
+
     private static var url: URL {
-        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("goalpilot.json")
+        FileManager.default.urls(
+            for: .documentDirectory,
+            in: .userDomainMask
+        )[0].appendingPathComponent("goalpilot.json")
     }
 
     init() {
-        if let d = try? Data(contentsOf: Self.url), let s = try? JSONDecoder().decode(Snapshot.self, from: d) {
-            goals = s.goals; disruptions = s.disruptions; plan = s.plan
-            planDay = s.planDay; settings = s.settings; credited = s.credited
+        load()
+    }
+
+    func load() {
+        guard
+            let data = try? Data(contentsOf: Self.url),
+            let snapshot = try? JSONDecoder().decode(
+                Snapshot.self,
+                from: data
+            )
+        else {
+            return
         }
+
+        goals = snapshot.goals
+        disruptions = snapshot.disruptions
+        plan = snapshot.plan
+        planDay = snapshot.planDay
+        settings = snapshot.settings
+        credited = snapshot.credited
     }
 
     func save() {
-        let s = Snapshot(goals: goals, disruptions: disruptions, plan: plan, planDay: planDay, settings: settings, credited: credited)
-        try? JSONEncoder().encode(s).write(to: Self.url, options: .atomic)
+        let snapshot = Snapshot(
+            goals: goals,
+            disruptions: disruptions,
+            plan: plan,
+            planDay: planDay,
+            settings: settings,
+            credited: credited
+        )
+
+        do {
+            let encoded = try JSONEncoder().encode(snapshot)
+
+            try encoded.write(
+                to: Self.url,
+                options: .atomic
+            )
+        } catch {
+            print("GoalPilot save error: \(error.localizedDescription)")
+        }
     }
 
-    // MARK: Derived
-    var today: Date { Calendar.current.startOfDay(for: Date()) }
-    var activeGoals: [Goal] { goals.filter { !$0.isComplete } }
-    var overallProgress: Double { goals.isEmpty ? 0 : goals.reduce(0) { $0 + $1.progress } / Double(goals.count) }
-    var todayCapacity: Int { Planner.capacity(settings, disruptions, day: today) }
-    var activeDisruptions: [Disruption] { disruptions.filter { $0.isActive(on: today) } }
-    func goal(_ id: UUID) -> Goal? { goals.first { $0.id == id } }
+    // MARK: Derived Properties
 
-    private func perDayNeed(_ g: Goal) -> Double { Double(g.remainingMinutes) / Double(g.daysLeft()) }
-    /// >1 means total demand exceeds what you can realistically do per day.
+    var today: Date {
+        Calendar.current.startOfDay(for: Date())
+    }
+
+    var activeGoals: [Goal] {
+        goals.filter { !$0.isComplete }
+    }
+
+    var overallProgress: Double {
+        guard !goals.isEmpty else { return 0 }
+
+        return goals.reduce(0) {
+            $0 + $1.progress
+        } / Double(goals.count)
+    }
+
+    var todayCapacity: Int {
+        Planner.capacity(
+            settings,
+            disruptions,
+            day: today
+        )
+    }
+
+    var activeDisruptions: [Disruption] {
+        disruptions.filter {
+            $0.isActive(on: today)
+        }
+    }
+
+    func goal(_ id: UUID) -> Goal? {
+        goals.first {
+            $0.id == id
+        }
+    }
+
+    // MARK: Goal Calculations
+
+    private func perDayNeed(_ goal: Goal) -> Double {
+        Double(goal.remainingMinutes) /
+        Double(goal.daysLeft())
+    }
+
+    /// Greater than 1 means demand exceeds daily capacity.
     var loadFactor: Double {
-        let need = activeGoals.reduce(0) { $0 + perDayNeed($1) }
-        return todayCapacity > 0 ? need / Double(todayCapacity) : (need > 0 ? 9 : 0)
-    }
-    func status(_ g: Goal) -> GoalStatus {
-        if g.isComplete { return .done }
-        switch loadFactor { case ...1.0: return .onTrack; case ...1.25: return .atRisk; default: return .behind }
-    }
-    /// Realistic finish date given current capacity share.
-    func projectedFinish(_ g: Goal) -> Date? {
-        let total = activeGoals.reduce(0) { $0 + perDayNeed($1) }
-        guard total > 0, todayCapacity > 0, !g.isComplete else { return nil }
-        let share = Double(todayCapacity) * perDayNeed(g) / total
-        guard share > 0 else { return nil }
-        return Calendar.current.date(byAdding: .day, value: Int(ceil(Double(g.remainingMinutes) / share)) - 1, to: today)
+        let need = activeGoals.reduce(0) {
+            $0 + perDayNeed($1)
+        }
+
+        guard todayCapacity > 0 else {
+            return need > 0 ? 9 : 0
+        }
+
+        return need / Double(todayCapacity)
     }
 
-    // MARK: Mutations
-    func add(_ g: Goal) { var n = g; n.colorIndex = goals.count; goals.append(n); save(); Task { await replan() } }
-    func delete(_ g: Goal) { goals.removeAll { $0.id == g.id }; plan.removeAll { $0.goalID == g.id }; save(); Task { await replan() } }
-    func add(_ d: Disruption) { disruptions.append(d); save(); Task { await replan() } }
-    func delete(_ d: Disruption) { disruptions.removeAll { $0.id == d.id }; save(); Task { await replan() } }
+    func status(_ goal: Goal) -> GoalStatus {
+        if goal.isComplete {
+            return .done
+        }
 
-    func log(_ minutes: Int, to g: Goal) {
-        guard let i = goals.firstIndex(where: { $0.id == g.id }) else { return }
-        goals[i].doneMinutes = max(0, goals[i].doneMinutes + minutes); save(); Task { await replan() }
+        switch loadFactor {
+        case ...1.0:
+            return .onTrack
+
+        case ...1.25:
+            return .atRisk
+
+        default:
+            return .behind
+        }
     }
+
+    /// Estimates the goal completion date.
+    func projectedFinish(_ goal: Goal) -> Date? {
+        let total = activeGoals.reduce(0) {
+            $0 + perDayNeed($1)
+        }
+
+        guard
+            total > 0,
+            todayCapacity > 0,
+            !goal.isComplete
+        else {
+            return nil
+        }
+
+        let share =
+            Double(todayCapacity) *
+            perDayNeed(goal) / total
+
+        guard share > 0 else {
+            return nil
+        }
+
+        let days = max(
+            1,
+            Int(ceil(Double(goal.remainingMinutes) / share))
+        )
+
+        return Calendar.current.date(
+            byAdding: .day,
+            value: days - 1,
+            to: today
+        )
+    }
+
+    // MARK: Goal Mutations
+
+    func add(_ goal: Goal) {
+        var newGoal = goal
+        newGoal.colorIndex = goals.count
+
+        goals.append(newGoal)
+
+        save()
+        scheduleReplan()
+    }
+
+    func delete(_ goal: Goal) {
+        goals.removeAll {
+            $0.id == goal.id
+        }
+
+        plan.removeAll {
+            $0.goalID == goal.id
+        }
+
+        save()
+        scheduleReplan()
+    }
+
+    // MARK: Disruption Mutations
+
+    func add(_ disruption: Disruption) {
+        disruptions.append(disruption)
+
+        save()
+        scheduleReplan()
+    }
+
+    func delete(_ disruption: Disruption) {
+        disruptions.removeAll {
+            $0.id == disruption.id
+        }
+
+        save()
+        scheduleReplan()
+    }
+
+    // MARK: Progress Tracking
+
+    func log(_ minutes: Int, to goal: Goal) {
+        guard let index = goals.firstIndex(
+            where: { $0.id == goal.id }
+        ) else {
+            return
+        }
+
+        goals[index].doneMinutes = max(
+            0,
+            goals[index].doneMinutes + minutes
+        )
+
+        save()
+        scheduleReplan()
+    }
+
+    // MARK: Plan Item Management
 
     func toggle(_ item: PlanItem) {
-        guard let i = plan.firstIndex(where: { $0.id == item.id }),
-              let gi = goals.firstIndex(where: { $0.id == item.goalID }) else { return }
-        plan[i].done.toggle()
-        goals[gi].doneMinutes = max(0, goals[gi].doneMinutes + (plan[i].done ? item.minutes : -item.minutes))
-        save(); Task { await replan() }
-    }
+        guard
+            let index = plan.firstIndex(
+                where: { $0.id == item.id }
+            ),
+            let goalIndex = goals.firstIndex(
+                where: { $0.id == item.goalID }
+            )
+        else {
+            return
+        }
 
-    // MARK: Planning
-    func replan() async {
-        let t = today
-        if planDay != t { plan = []; planDay = t }
-        busy = settings.useCalendar ? await ActivityReader.shared.busy(on: t) : []
-        if settings.useHealth { await creditExercise(t) }
-        let done = plan.filter(\.done)
-        let free = max(0, todayCapacity - done.reduce(0) { $0 + $1.minutes })
-        let allocs = Planner.allocate(goals, done: done, capacity: free, day: t)
-        let items = Planner.schedule(allocs, settings: settings, busy: busy, now: Date())
-        plan = (done + items).sorted { $0.start < $1.start }
+        plan[index].done.toggle()
+
+        let adjustment = plan[index].done
+            ? item.minutes
+            : -item.minutes
+
+        goals[goalIndex].doneMinutes = max(
+            0,
+            goals[goalIndex].doneMinutes + adjustment
+        )
+
         save()
-        await Notifier.reschedule(goals: goals, plan: plan, settings: settings)
+        scheduleReplan()
     }
 
-    private func creditExercise(_ t: Date) async {
-        let minutes = await ActivityReader.shared.exerciseMinutes(on: t)
-        for i in goals.indices where goals[i].tracksExercise && !goals[i].isComplete {
-            let key = "\(goals[i].id)-\(Int(t.timeIntervalSince1970))"
-            let delta = minutes - (credited[key] ?? 0)
-            if delta > 0 { goals[i].doneMinutes += delta; credited[key] = minutes }
+    /// Convenience method used by TodayView.
+    func togglePlanItem(_ id: UUID) {
+        guard let item = plan.first(where: {
+            $0.id == id
+        }) else {
+            return
+        }
+
+        toggle(item)
+    }
+
+    // MARK: Automatic Replanning
+
+    private func scheduleReplan() {
+        Task {
+            await replan()
+        }
+    }
+
+    func replan() async {
+
+        let currentDay = today
+
+        // Reset the plan when a new day begins.
+        if planDay != currentDay {
+            plan = []
+            planDay = currentDay
+        }
+
+        // Read calendar availability.
+        if settings.useCalendar {
+            busy = await ActivityReader.shared.busy(
+                on: currentDay
+            )
+        } else {
+            busy = []
+        }
+
+        // Credit Apple Health exercise.
+        if settings.useHealth {
+            await creditExercise(currentDay)
+        }
+
+        // Preserve completed tasks.
+        let completedItems = plan.filter {
+            $0.done
+        }
+
+        let completedMinutes = completedItems.reduce(0) {
+            $0 + $1.minutes
+        }
+
+        // Calculate remaining daily capacity.
+        let freeCapacity = max(
+            0,
+            todayCapacity - completedMinutes
+        )
+
+        // Allocate time across active goals.
+        let allocations = Planner.allocate(
+            goals,
+            done: completedItems,
+            capacity: freeCapacity,
+            day: currentDay
+        )
+
+        // Schedule around calendar events.
+        let newItems = Planner.schedule(
+            allocations,
+            settings: settings,
+            busy: busy,
+            now: Date()
+        )
+
+        // Combine completed and newly scheduled tasks.
+        plan = (
+            completedItems + newItems
+        ).sorted {
+            $0.start < $1.start
+        }
+
+        save()
+
+        // Refresh notifications.
+        await Notifier.reschedule(
+            goals: goals,
+            plan: plan,
+            settings: settings
+        )
+    }
+
+    // MARK: Apple Health Integration
+
+    private func creditExercise(_ day: Date) async {
+
+        let minutes = await ActivityReader.shared.exerciseMinutes(
+            on: day
+        )
+
+        for index in goals.indices
+        where goals[index].tracksExercise &&
+              !goals[index].isComplete {
+
+            let key = "\(goals[index].id)-\(Int(day.timeIntervalSince1970))"
+
+            let previouslyCredited = credited[key] ?? 0
+
+            let difference = minutes - previouslyCredited
+
+            if difference > 0 {
+
+                goals[index].doneMinutes += difference
+
+                credited[key] = minutes
+            }
         }
     }
 }
