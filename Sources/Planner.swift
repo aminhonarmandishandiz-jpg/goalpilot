@@ -10,7 +10,13 @@ enum Planner {
     static func allocate(_ goals: [Goal], done: [PlanItem], capacity: Int, day: Date) -> [(Goal, Int)] {
         var needs: [(Goal, Double)] = []
         for g in goals where !g.isComplete {
-            let d = Double(done.filter { $0.goalID == g.id }.reduce(0) { $0 + $1.minutes })
+            let d = Double(
+    done.filter {
+        $0.goalID == g.id && $0.done
+    }.reduce(0) {
+        $0 + $1.minutes
+    }
+)
             let perDay = (Double(g.remainingMinutes) + d) / Double(g.daysLeft(from: day))
             let weight = 1 + 0.2 * Double(g.priority - 2)
             needs.append((g, min(Double(g.remainingMinutes), max(0, perDay * weight - d))))
