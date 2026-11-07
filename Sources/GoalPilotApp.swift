@@ -29,12 +29,30 @@ struct RootView: View {
 }
 
 struct MainTabs: View {
+    @StateObject private var data = DataStore()
+
     var body: some View {
         TabView {
-            TodayView().tabItem { Label("Today", systemImage: "checklist") }
-            GoalsView().tabItem { Label("Goals", systemImage: "target") }
-            DisruptionsView().tabItem { Label("Life Events", systemImage: "exclamationmark.triangle") }
-            SettingsView().tabItem { Label("Settings", systemImage: "gearshape") }
+            TodayView()
+                .tabItem {
+                    Label("Today", systemImage: "checklist")
+                }
+
+            GoalsView()
+                .tabItem {
+                    Label("Goals", systemImage: "target")
+                }
+
+            DisruptionsView()
+                .tabItem {
+                    Label("Life Events", systemImage: "exclamationmark.triangle")
+                }
+
+            SettingsView()
+                .tabItem {
+                    Label("Settings", systemImage: "gearshape")
+                }
         }
+        .environmentObject(data)
     }
 }
