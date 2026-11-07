@@ -53,6 +53,9 @@ struct TodayView: View {
     }
 }
 
+
+import SwiftUI
+
 // MARK: - Goals View
 
 struct GoalsView: View {
@@ -62,29 +65,29 @@ struct GoalsView: View {
     var body: some View {
         NavigationStack {
             List {
-                ForEach(data.goals) { goal in
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack {
-                            Image(systemName: goal.type.icon)
-                            Text(goal.title)
-                                .font(.headline)
-                            Spacer()
-                            Text(goal.isComplete ? "Completed" : goal.remainingMinutes.description + " min left")
-                                .font(.caption)
+                if data.goals.isEmpty {
+                    ContentUnavailableView(
+                        "No Goals Yet",
+                        systemImage: "target",
+                        description: Text("Add your first goal to start planning your progress.")
+                    )
+                } else {
+                    ForEach(data.goals) { goal in
+                        NavigationLink {
+                            GoalDetailView(goalID: goal.id)
+                        } label: {
+                            goalRow(goal)
+                        }
+                    }
+                    .onDelete { offsets in
+                        let selected = offsets.map {
+                            data.goals[$0]
                         }
 
-                        ProgressView(value: goal.progress)
-                            .tint(goal.color)
-
-                        Text(goal.deadline.formatted(date: .abbreviated, time: .omitted))
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                        selected.forEach {
+                            data.delete($0)
+                        }
                     }
-                }
-                .onDelete { offsets in
-                    data.goals.remove(atOffsets: offsets)
-                    data.save()
-                    Task { await data.replan() }
                 }
             }
             .navigationTitle("Goals")
@@ -102,6 +105,63 @@ struct GoalsView: View {
             }
         }
     }
+
+    // MARK: Goal Row
+
+    private func goalRow(_ goal: Goal) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Image(systemName: goal.type.icon)
+                    .foregroundStyle(goal.color)
+
+                Text(goal.title)
+                    .font(.headline)
+
+                Spacer()
+
+                Text(
+                    goal.isComplete
+                    ? "Completed"
+                    : "\(goal.remainingMinutes) min left"
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+
+            ProgressView(value: goal.progress)
+                .tint(goal.color)
+
+            HStack {
+                Label(
+                    goal.deadline.formatted(
+                        date: .abbreviated,
+                        time: .omitted
+                    ),
+                    systemImage: "calendar"
+                )
+
+                Spacer()
+
+                Text("\(Int(goal.progress * 100))%")
+                    .fontWeight(.semibold)
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+
+            HStack {
+                Text(data.status(goal).rawValue)
+                    .font(.caption)
+                    .foregroundStyle(data.status(goal).color)
+
+                Spacer()
+
+                Text("Priority: \(goal.priority)/3")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.vertical, 6)
+    }
 }
 
 // MARK: - Add Goal View
@@ -112,66 +172,189 @@ struct AddGoalView: View {
 
     @State private var title = ""
     @State private var type: GoalType = .personal
+
     @State private var deadline = Calendar.current.date(
         byAdding: .day,
         value: 30,
         to: Date()
     ) ?? Date()
+
     @State private var minutes = 600
     @State private var priority = 2
+    @State private var tracksExercise = false
 
     var body: some View {
         NavigationStack {
             Form {
-                TextField("Goal title", text: $title)
+                Section("Goal details") {
+                    TextField("Goal title", text: $title)
 
-                Picker("Goal type", selection: $type) {
-                    ForEach(GoalType.allCases) { item in
-                        Text(item.rawValue).tag(item)
+                    Picker("Goal type", selection: $type) {
+                        ForEach(GoalType.allCases) { item in
+                            Label(item.rawValue, systemImage: item.icon)
+                                .tag(item)
+                        }
+                    }
+
+                    DatePicker(
+                        "Deadline",
+                        selection: $deadline,
+                        in: Date()...,
+                        displayedComponents: .date
+                    )
+                }
+
+                Section("Effort and priority") {
+                    Stepper(
+                        "Estimated effort: \(minutes / 60)h \(minutes % 60)m",
+                        value: $minutes,
+                        in: 30...10000,
+                        step: 30
+                    )
+
+                    Picker("Priority", selection: $priority) {
+                        Text("Low").tag(1)
+                        Text("Medium").tag(2)
+                        Text("High").tag(3)
                     }
                 }
 
-                DatePicker("Deadline", selection: $deadline, in: Date()..., displayedComponents: .date)
+                Section("Health tracking") {
+                    Toggle(
+                        "Track exercise automatically",
+                        isOn: $tracksExercise
+                    )
 
-                Stepper("Estimated effort: \(minutes) minutes", value: $minutes, in: 30...10000, step: 30)
-
-                Picker("Priority", selection: $priority) {
-                    Text("Low").tag(1)
-                    Text("Medium").tag(2)
-                    Text("High").tag(3)
+                    Text("Exercise minutes from Apple Health can count toward this goal when Health access is enabled.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
             .navigationTitle("New Goal")
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
+                    Button("Cancel") {
+                        dismiss()
+                    }
                 }
 
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") {
-                        let goal = Goal(
-                            title: title.trimmingCharacters(in: .whitespacesAndNewlines),
-                            type: type,
-                            deadline: deadline,
-                            totalMinutes: minutes,
-                            priority: priority
-                        )
-
-                        data.goals.append(goal)
-                        data.save()
-
-                        Task {
-                            await data.replan()
-                        }
-
-                        dismiss()
+                        saveGoal()
                     }
-                    .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(
+                        title.trimmingCharacters(
+                            in: .whitespacesAndNewlines
+                        ).isEmpty
+                    )
                 }
             }
         }
     }
+
+    // MARK: Save Goal
+
+    private func saveGoal() {
+        let goal = Goal(
+            title: title.trimmingCharacters(
+                in: .whitespacesAndNewlines
+            ),
+            type: type,
+            deadline: deadline,
+            totalMinutes: minutes,
+            priority: priority,
+            tracksExercise: tracksExercise
+        )
+
+        // Use DataStore's add method.
+        // It handles saving and replanning automatically.
+        data.add(goal)
+
+        dismiss()
+    }
 }
+
+// MARK: - Goal Detail View
+
+struct GoalDetailView: View {
+    @EnvironmentObject var data: DataStore
+
+    let goalID: UUID
+
+    private var goal: Goal? {
+        data.goal(goalID)
+    }
+
+    var body: some View {
+        Group {
+            if let goal {
+                Form {
+                    Section("Progress") {
+                        Text(goal.title)
+                            .font(.headline)
+
+                        ProgressView(value: goal.progress)
+                            .tint(goal.color)
+
+                        Text("\(Int(goal.progress * 100))% completed")
+
+                        Text("\(goal.doneMinutes) / \(goal.totalMinutes) minutes")
+                    }
+
+                    Section("Goal information") {
+                        LabeledContent(
+                            "Type",
+                            value: goal.type.rawValue
+                        )
+
+                        LabeledContent(
+                            "Priority",
+                            value: "\(goal.priority)/3"
+                        )
+
+                        LabeledContent(
+                            "Deadline",
+                            value: goal.deadline.formatted(date: .long, time: .omitted)
+                        )
+
+                        LabeledContent(
+                            "Remaining",
+                            value: "\(goal.remainingMinutes) minutes"
+                        )
+
+                        LabeledContent(
+                            "Status",
+                            value: data.status(goal).rawValue
+                        )
+                    }
+
+                    Section("Log progress") {
+                        Button("+15 minutes") {
+                            data.log(15, to: goal)
+                        }
+
+                        Button("+30 minutes") {
+                            data.log(30, to: goal)
+                        }
+
+                        Button("+60 minutes") {
+                            data.log(60, to: goal)
+                        }
+                    }
+                }
+                .navigationTitle("Goal Details")
+                .navigationBarTitleDisplayMode(.inline)
+            } else {
+                ContentUnavailableView(
+                    "Goal Not Found",
+                    systemImage: "target"
+                )
+            }
+        }
+    }
+}
+
 
 // MARK: - Disruptions View
 
