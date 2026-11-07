@@ -2,6 +2,66 @@
 import SwiftUI
 import StoreKit
 
+
+// MARK: - Settings View
+
+struct SettingsView: View {
+    @EnvironmentObject var data: DataStore
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Planning") {
+                    Toggle(
+                        "Use Calendar",
+                        isOn: $data.settings.useCalendar
+                    )
+
+                    Toggle(
+                        "Use Health",
+                        isOn: $data.settings.useHealth
+                    )
+                }
+
+                Section("GoalPilot") {
+                    HStack {
+                        Text("Total goals")
+                        Spacer()
+                        Text("\(data.goals.count)")
+                            .foregroundStyle(.secondary)
+                    }
+
+                    HStack {
+                        Text("Active goals")
+                        Spacer()
+                        Text("\(data.activeGoals.count)")
+                            .foregroundStyle(.secondary)
+                    }
+
+                    HStack {
+                        Text("Overall progress")
+                        Spacer()
+                        Text("\(Int(data.overallProgress * 100))%")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                Section {
+                    Button("Save Settings") {
+                        data.save()
+
+                        Task {
+                            await data.replan()
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Settings")
+        }
+    }
+}
+
+
 // MARK: - Today View
 
 struct TodayView: View {
