@@ -1,3 +1,6 @@
+import SwiftUI
+import StoreKit
+import UIKit
 
  // MARK: - Settings
 struct SettingsView: View {
